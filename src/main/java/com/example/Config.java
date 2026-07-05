@@ -2,6 +2,7 @@ package com.example;
 
 import java.time.Duration;
 import java.util.Map;
+import org.apache.pulsar.client.api.SubscriptionInitialPosition;
 import org.apache.pulsar.client.api.SubscriptionType;
 
 /**
@@ -15,6 +16,7 @@ public record Config(
     String topic,
     String subscription,
     SubscriptionType subscriptionType,
+    SubscriptionInitialPosition initialPosition,
     long maxMessages,
     Duration idleTimeout) {
 
@@ -23,6 +25,7 @@ public record Config(
   public static final String ENV_TOPIC = "PULSAR_TOPIC";
   public static final String ENV_SUBSCRIPTION = "PULSAR_SUBSCRIPTION";
   public static final String ENV_SUBSCRIPTION_TYPE = "PULSAR_SUBSCRIPTION_TYPE";
+  public static final String ENV_INITIAL_POSITION = "PULSAR_INITIAL_POSITION";
   public static final String ENV_MAX_MESSAGES = "PULSAR_MAX_MESSAGES";
   public static final String ENV_RECEIVE_TIMEOUT_MS = "PULSAR_RECEIVE_TIMEOUT_MS";
 
@@ -40,6 +43,11 @@ public record Config(
     String topic = envOr(env, ENV_TOPIC, "persistent://public/default/my-topic");
     String sub = envOr(env, ENV_SUBSCRIPTION, "my-subscription");
     SubscriptionType type = parseType(envOr(env, ENV_SUBSCRIPTION_TYPE, "Shared"));
+    // Default Earliest so a fresh subscription reads the backlog head — matches the
+    // "drain 10k per run from a large backlog" use case. Override with `Latest` if you only
+    // want messages published after the consumer connects.
+    SubscriptionInitialPosition pos =
+        parseInitialPosition(envOr(env, ENV_INITIAL_POSITION, "Earliest"));
     long max = parseLong(envOr(env, ENV_MAX_MESSAGES, "10000"), DEFAULT_MAX_MESSAGES);
     long idleMs = parseLong(envOr(env, ENV_RECEIVE_TIMEOUT_MS, "10000"), DEFAULT_IDLE_TIMEOUT_MS);
     if (max <= 0) {
@@ -48,7 +56,7 @@ public record Config(
     if (idleMs < 100) {
       throw new IllegalArgumentException("PULSAR_RECEIVE_TIMEOUT_MS must be >= 100");
     }
-    return new Config(url, topic, sub, type, max, Duration.ofMillis(idleMs));
+    return new Config(url, topic, sub, type, pos, max, Duration.ofMillis(idleMs));
   }
 
   /** Parse a case-insensitive subscription type name. Throws on unknown values. */
@@ -65,6 +73,20 @@ public record Config(
       default -> throw new IllegalArgumentException(
           "PULSAR_SUBSCRIPTION_TYPE must be one of Exclusive|Failover|Shared|Key_Shared (got: "
               + raw + ")");
+    };
+  }
+
+  /** Parse a case-insensitive initial position name. Throws on unknown values. */
+  public static SubscriptionInitialPosition parseInitialPosition(String raw) {
+    if (raw == null) {
+      throw new IllegalArgumentException(
+          "PULSAR_INITIAL_POSITION must be Earliest or Latest (got: null)");
+    }
+    return switch (raw.trim().toLowerCase(java.util.Locale.ROOT)) {
+      case "earliest" -> SubscriptionInitialPosition.Earliest;
+      case "latest" -> SubscriptionInitialPosition.Latest;
+      default -> throw new IllegalArgumentException(
+          "PULSAR_INITIAL_POSITION must be Earliest or Latest (got: " + raw + ")");
     };
   }
 

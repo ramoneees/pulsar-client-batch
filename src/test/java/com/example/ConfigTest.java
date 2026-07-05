@@ -5,6 +5,7 @@ import static org.junit.jupiter.api.Assertions.*;
 import java.time.Duration;
 import java.util.HashMap;
 import java.util.Map;
+import org.apache.pulsar.client.api.SubscriptionInitialPosition;
 import org.apache.pulsar.client.api.SubscriptionType;
 import org.junit.jupiter.api.Test;
 
@@ -17,6 +18,7 @@ class ConfigTest {
     assertEquals("persistent://public/default/my-topic", config.topic());
     assertEquals("my-subscription", config.subscription());
     assertEquals(SubscriptionType.Shared, config.subscriptionType());
+    assertEquals(SubscriptionInitialPosition.Earliest, config.initialPosition());
     assertEquals(10_000L, config.maxMessages());
     assertEquals(Duration.ofMillis(10_000L), config.idleTimeout());
   }
@@ -28,6 +30,7 @@ class ConfigTest {
     env.put(Config.ENV_TOPIC, "persistent://tenant/ns/foo");
     env.put(Config.ENV_SUBSCRIPTION, "sub-x");
     env.put(Config.ENV_SUBSCRIPTION_TYPE, "Exclusive");
+    env.put(Config.ENV_INITIAL_POSITION, "Latest");
     env.put(Config.ENV_MAX_MESSAGES, "4242");
     env.put(Config.ENV_RECEIVE_TIMEOUT_MS, "30000");
 
@@ -37,8 +40,25 @@ class ConfigTest {
     assertEquals("persistent://tenant/ns/foo", config.topic());
     assertEquals("sub-x", config.subscription());
     assertEquals(SubscriptionType.Exclusive, config.subscriptionType());
+    assertEquals(SubscriptionInitialPosition.Latest, config.initialPosition());
     assertEquals(4242L, config.maxMessages());
     assertEquals(Duration.ofMillis(30_000L), config.idleTimeout());
+  }
+
+  @Test
+  void parseInitialPosition_acceptsEarliestAndLatestCaseInsensitive() {
+    assertEquals(SubscriptionInitialPosition.Earliest, Config.parseInitialPosition("earliest"));
+    assertEquals(SubscriptionInitialPosition.Latest, Config.parseInitialPosition("LATEST"));
+    assertEquals(SubscriptionInitialPosition.Earliest, Config.parseInitialPosition("  Earliest  "));
+  }
+
+  @Test
+  void parseInitialPosition_unknownThrows() {
+    IllegalArgumentException ex =
+        assertThrows(
+            IllegalArgumentException.class, () -> Config.parseInitialPosition("middle"));
+    assertTrue(ex.getMessage().contains("Earliest or Latest"));
+    assertTrue(ex.getMessage().contains("middle"));
   }
 
   @Test

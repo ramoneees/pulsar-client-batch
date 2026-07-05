@@ -37,11 +37,12 @@ public final class PulsarConsumerApp {
 
     System.out.printf(
         "Connecting to Pulsar:%n  service-url : %s%n  topic       : %s%n  subscription: %s (%s)%n"
-            + "  max-messages: %d%n  idle-timeout: %d ms%n",
+            + "  initial-pos : %s%n  max-messages: %d%n  idle-timeout: %d ms%n",
         config.serviceUrl(),
         config.topic(),
         config.subscription(),
         config.subscriptionType(),
+        config.initialPosition(),
         config.maxMessages(),
         config.idleTimeout().toMillis());
 
@@ -50,8 +51,8 @@ public final class PulsarConsumerApp {
       Runtime.getRuntime().addShutdownHook(new Thread(() -> closeQuietly(consumer, "consumer")));
       try (consumer) {
         long startTime = System.nanoTime();
-        long total = new DrainRunner(consumer, config).run();
-        printSummary(total, System.nanoTime() - startTime);
+        DrainRunner.Result result = new DrainRunner(consumer, config).run();
+        printSummary(result, System.nanoTime() - startTime);
       }
     } catch (PulsarClientException e) {
       // AlreadyClosedException is a subclass of PulsarClientException and is caught here.
@@ -74,8 +75,18 @@ public final class PulsarConsumerApp {
         .topic(config.topic())
         .subscriptionName(config.subscription())
         .subscriptionType(config.subscriptionType())
+        .subscriptionInitialPosition(config.initialPosition())
         .batchReceivePolicy(policy)
         .subscribe();
+  }
+
+  private static void printSummary(DrainRunner.Result result, long elapsedNanos) {
+    double elapsedSecs = elapsedNanos / 1_000_000_000.0;
+    double avg = elapsedSecs > 0 ? result.acked() / elapsedSecs : 0;
+    System.out.println("--------");
+    System.out.printf(
+        "Done. acked=%d, reason=%s, elapsed=%.3fs, avg=%.0f msgs/s%n",
+        result.acked(), result.reason(), elapsedSecs, avg);
   }
 
   private static void printSummary(long total, long elapsedNanos) {

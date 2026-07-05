@@ -111,6 +111,7 @@ try (var client = PulsarClient.builder().serviceUrl("pulsar://localhost:6650").b
 | `PULSAR_TOPIC` | `persistent://public/default/my-topic` | Fully-qualified topic name. |
 | `PULSAR_SUBSCRIPTION` | `my-subscription` | Subscription name. Persistent across runs unless deleted. |
 | `PULSAR_SUBSCRIPTION_TYPE` | `Shared` | One of `Exclusive`, `Failover`, `Shared`, `Key_Shared` (case-insensitive, also accepts `Key_Shared` / `Key-Shared`). |
+| `PULSAR_INITIAL_POSITION` | `Earliest` | Where a brand-new subscription starts reading. `Earliest` = head of backlog (use this for draining). `Latest` = only messages published after connect. Ignored if the subscription already exists (the broker resumes from its persisted cursor). |
 | `PULSAR_MAX_MESSAGES` | `10000` | Per-run cap. Stops the run exactly at this count. |
 | `PULSAR_RECEIVE_TIMEOUT_MS` | `10000` | Idle timeout. If `batchReceive()` returns empty for this many ms, the topic is considered drained and the run ends. |
 
@@ -122,12 +123,72 @@ The main loop calls `consumer.batchReceive()` with a per-batch policy of:
 - `maxNumBytes = 10 MiB`
 - `timeout = 200 ms`
 
-The run ends when **either**:
+The run ends when **any** of:
 
 1. The cumulative message count reaches `PULSAR_MAX_MESSAGES` (truncated exactly — never exceeded), or
-2. The topic has been idle (no messages returned by `batchReceive()`) for at least `PULSAR_RECEIVE_TIMEOUT_MS`.
+2. The topic has been idle (no messages returned by `batchReceive()`) for at least `PULSAR_RECEIVE_TIMEOUT_MS`, or
+3. A message fails processing (nacked; see "Processing & error handling" below).
 
-Per-message individual acks are used (`consumer.acknowledge(msg)`). This is the only mode that works correctly for `Shared` and `Key_Shared` subscriptions; it is also valid for `Exclusive`/`Failover`.
+Per-message individual acks are used (`consumer.acknowledge(msg)`) on every successfully processed message. This is the only mode that works correctly for `Shared` and `Key_Shared` subscriptions; it is also valid for `Exclusive`/`Failover`.
+
+## Paginated draining (drain a large backlog across multiple runs)
+
+For draining a large backlog — e.g. **106k messages, 10k per run** — run the jar repeatedly with the
+**same `PULSAR_SUBSCRIPTION` name**. The broker persists the subscription cursor in BookKeeper on
+every ack, so each run resumes exactly where the prior run stopped. **No local cursor file is
+needed** — the named subscription IS the cursor.
+
+Recommended settings:
+
+```bash
+PULSAR_SUBSCRIPTION=drain-106k-backlog \
+PULSAR_SUBSCRIPTION_TYPE=Exclusive \
+PULSAR_INITIAL_POSITION=Earliest \
+PULSAR_MAX_MESSAGES=10000 \
+java -jar target/pulsar-consumer-1.0.0.jar
+```
+
+- `Exclusive` — required for ordered reading; only one consumer per subscription name at a time.
+- `Earliest` — first run reads from the head of the backlog (subsequent runs ignore this; the
+  persisted cursor wins).
+- `PULSAR_MAX_MESSAGES=10000` — 10k per run; 106k backlog → ~11 runs to drain.
+- Same `PULSAR_SUBSCRIPTION` every run — the broker remembers position.
+
+**Caveat — subscription type is immutable.** If you previously created the subscription as
+`Shared`, switching to `Exclusive` requires deleting it first:
+
+```bash
+bin/pulsar-admin persistent unsubscribe \
+  --subscription drain-106k-backlog persistent://public/default/my-topic
+```
+
+Or just use a new subscription name.
+
+## Processing & error handling
+
+By default the consumer treats every received message as successfully processed and acks it. To plug
+in your own logic (DB write, API call, transformation, etc.), implement `com.example.Processor` and
+pass it to `new DrainRunner(consumer, config, yourProcessor)`:
+
+```java
+public enum ProcessorResult { OK, FAILED, POISON }
+
+@FunctionalInterface
+public interface Processor<T> {
+  ProcessorResult process(Message<T> message) throws Exception;
+}
+```
+
+- **`OK`** — message acked, loop continues.
+- **`FAILED` (transient)** — message nacked via `consumer.negativeAcknowledge(msg)`, run stops
+  immediately. The broker re-delivers the same message on the next run because the subscription
+  cursor is not advanced past an unacked message.
+- **`POISON` (permanent)** — same behavior as `FAILED` in this build (no dead-letter queue wired).
+  A real deployment would route these to a DLQ topic instead of redelivering forever.
+- **Processor throws** — caught and treated as `FAILED` (nack + stop).
+
+Idempotency: because `FAILED` triggers redelivery, your `Processor` should be idempotent on
+re-runs if at-least-once semantics are unacceptable for your downstream effect.
 
 ### Exit codes
 
